@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from pathlib import Path
 
@@ -38,11 +39,14 @@ class KnowledgeRetriever:
     async def initialize(self) -> None:
         """Build or reload the Chroma vector store from the knowledge base.
 
-        Idempotent: chunks already present (identified by stable SHA-256 IDs
-        derived from source filename + content) are NOT re-added on restart.
-        Raises a descriptive RuntimeError when initialization fails so that
-        FastAPI's lifespan can surface the problem instead of claiming ready.
+        Runs the blocking embedding/Chroma setup in a thread pool so the
+        FastAPI event loop stays responsive during startup.
         """
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._sync_initialize)
+
+    def _sync_initialize(self) -> None:
+        """Blocking initialization — called from a thread pool."""
         documents = split_support_documents(load_support_documents(self.documents_dir))
         embeddings = build_embeddings(self.settings)
 
@@ -100,16 +104,9 @@ class KnowledgeRetriever:
     async def search(self, query: str, limit: int | None = None) -> list[dict[str, str]]:
         """Return relevant chunks grounded in the knowledge base.
 
-        Returns a list of ``{"content": str, "source": str}`` dicts ordered
+        Returns a list of {"content": str, "source": str} dicts ordered
         from most to least relevant. Returns an empty list when no chunks pass
-        the relevance threshold, signalling the "not in KB" path to callers.
-
-        Args:
-            query: The customer's question or message excerpt.
-            limit: Maximum number of chunks to return; falls back to settings.
-
-        Raises:
-            ComponentNotReadyError: When ``initialize()`` has not completed.
+        the relevance threshold.
         """
         if self._store is None:
             raise ComponentNotReadyError(
@@ -118,10 +115,11 @@ class KnowledgeRetriever:
             )
 
         if not query or not query.strip():
-            # Blank queries produce meaningless embeddings — return nothing safely.
             return []
 
-        top_k = limit if limit is not None else self.settings.rag_top_k
+        # Use top_k=1 by default — the workflow only uses the top chunk anyway,
+        # so fetching more would just waste embedding compute.
+        top_k = limit if limit is not None else min(self.settings.rag_top_k, 1)
 
         try:
             # similarity_search_with_relevance_scores returns (Document, score)

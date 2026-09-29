@@ -15,7 +15,9 @@ from .contracts import STTService
 
 logger = logging.getLogger(__name__)
 
-_MODEL_SIZE = "base"  # tiny | base | small — trade speed vs accuracy
+# "tiny" is ~4x faster than "base" on CPU with acceptable accuracy for short
+# customer support queries. Switch to "base" if accuracy matters more than speed.
+_MODEL_SIZE = "tiny"
 
 
 class WhisperSTTAdapter(STTService):

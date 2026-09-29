@@ -1,20 +1,20 @@
-SYSTEM_PROMPT = """You are a customer-support agent.
+"""Tighter system and answer prompts — fewer tokens = faster LLM response."""
 
-Use only the supplied knowledge context for policy answers. If the context does
-not contain the answer, say so clearly. Never request passwords, one-time codes,
-or complete payment-card numbers. Do not claim a ticket exists unless the ticket
-tool returned an identifier.
-"""
+# Kept very short: every extra word costs inference time.
+SYSTEM_PROMPT = (
+    "You are a customer-support agent for Zangoh (e-commerce). "
+    "Answer using ONLY the provided context. "
+    "Be concise (2-4 sentences). "
+    "Never ask for passwords, OTPs, or full card numbers."
+)
 
-ANSWER_TEMPLATE = """Knowledge context:
+# Minimal template — no fluff tokens.
+ANSWER_TEMPLATE = """\
+Context:
 {context}
 
-Conversation state:
+Recent chat:
 {session}
 
-Customer message:
-{message}
-"""
-
-# Candidates may extend these prompts or use structured output. Keep grounding,
-# privacy, and tool-side-effect rules explicit and covered by tests.
+Customer: {message}
+Answer (2-4 sentences, use context only):"""

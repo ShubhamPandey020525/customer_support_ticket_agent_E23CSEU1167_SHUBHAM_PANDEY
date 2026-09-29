@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Annotated, TypedDict
 
@@ -167,9 +168,9 @@ def build_support_workflow(
                     in_ticket_flow = True
 
         retrieved_chunks = state.get("retrieved_chunks", [])
-        # Only send first 400 chars per chunk to the decide node — it only needs
-        # enough to know whether context is relevant, not the full text.
-        context_text = "\n".join(c["content"][:400] for c in retrieved_chunks[:2]) if retrieved_chunks else ""
+        # Only use first 300 chars of the top-1 chunk — enough for classification,
+        # much fewer tokens sent to LLM.
+        context_text = retrieved_chunks[0]["content"][:300] if retrieved_chunks else ""
 
         # OPTIMISED: Short, direct prompt — no long preamble.
         if in_ticket_flow:
@@ -277,16 +278,18 @@ def build_support_workflow(
                 "ticket_id": state.get("ticket_id"),
             }
 
-        context_text = "\n\n".join(c["content"] for c in retrieved_chunks)
-        sources = sorted({c["source"] for c in retrieved_chunks if c.get("source")})
+        # OPTIMISATION: Only use the single most-relevant chunk to keep
+        # the prompt small and LLM inference fast.
+        top_chunk = retrieved_chunks[0]
+        context_text = top_chunk["content"][:600]  # hard cap at 600 chars
+        sources = [top_chunk["source"]] if top_chunk.get("source") else []
 
-        # OPTIMISATION: Only include the last 2 turns of history (not the full log).
+        # OPTIMISATION: Limit session context to the single last assistant turn
+        # (not 2 turns) to save tokens.
         session_context = ""
         if session and session.history:
-            recent = session.history[-2:]
-            session_context = "\n".join(
-                f"{turn['role'].capitalize()}: {turn['content'][:200]}" for turn in recent
-            )
+            last = session.history[-1]
+            session_context = f"{last['role'].capitalize()}: {last['content'][:150]}"
 
         prompt_text = ANSWER_TEMPLATE.format(
             context=context_text,
