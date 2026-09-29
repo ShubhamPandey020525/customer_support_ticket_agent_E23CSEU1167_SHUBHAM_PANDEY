@@ -21,13 +21,13 @@ graph TD
     %% Components
     User((User)) --> |HTTP POST /chat| UI
 
-    subgraph Presentation Layer
+    subgraph PresentationLayer [Presentation Layer]
         UI["Streamlit UI (Port 8501)<br/>Session-aware, Source pills"]:::frontend
     end
 
     UI --> |REST JSON Payload| API
 
-    subgraph Application & Routing Layer
+    subgraph ApplicationLayer [Application & Routing Layer]
         API["FastAPI App (Port 8000)<br/>Async Endpoints, Validation"]:::backend
         SS[("SessionStore<br/>(In-Memory UUID State)")]:::backend
         API -.-> |Injects| SS
@@ -35,7 +35,7 @@ graph TD
 
     API --> |Initializes & Invokes| Pipeline
 
-    subgraph Agentic Orchestration Layer (LangGraph)
+    subgraph OrchestrationLayer [Agentic Orchestration Layer - LangGraph]
         Pipeline["SupportPipeline<br/>Stateful Execution Engine"]:::orchestration
         NodeDecide{"Node: decide<br/>(Intent Classification)"}:::orchestration
         NodeRetrieve["Node: retrieve<br/>(RAG Trigger)"]:::orchestration
@@ -48,7 +48,7 @@ graph TD
         NodeDecide -->|route == 'ticket'| NodeTicket
     end
 
-    subgraph RAG & Knowledge Layer
+    subgraph RAGLayer [RAG & Knowledge Layer]
         DocumentLoader["Document Loader<br/>(Markdown Parsing)"]:::rag
         Embeddings["HuggingFace Embeddings<br/>(all-MiniLM-L6-v2)"]:::rag
         VectorDB[("ChromaDB<br/>Persistent Vector Store")]:::rag
@@ -59,7 +59,7 @@ graph TD
         Retriever --> |Top K chunks| VectorDB
     end
 
-    subgraph AI Inference Layer
+    subgraph AILayer [AI Inference Layer]
         Ollama["Ollama Engine<br/>Local Inference"]:::llm
         Model["Qwen2.5:3b<br/>(Structured Output via Pydantic)"]:::llm
         Ollama --> Model
@@ -67,7 +67,7 @@ graph TD
         NodeAnswer -.-> |Context + Prompt| Ollama
     end
 
-    subgraph Tools & External Services
+    subgraph ExternalServices [Tools & External Services]
         TicketDB[("Mock Ticket DB<br/>TicketRepository")]:::external
         NodeTicket --> |CRUD Operations| TicketDB
     end
