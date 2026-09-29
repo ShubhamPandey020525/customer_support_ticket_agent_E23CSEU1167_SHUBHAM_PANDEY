@@ -4,47 +4,103 @@ A text-based customer support agent that answers policy questions using a RAG kn
 
 ---
 
-## Architecture
+## System Architecture & Technical Design
 
-```text
-┌──────────────────────────────────────────────────────┐
-│                  Customer (Browser)                  │
-└───────────────────────┬──────────────────────────────┘
-                        │ HTTP (chat input)
-┌───────────────────────▼──────────────────────────────┐
-│              Streamlit UI  (port 8501)               │
-│  - Session-aware chat with UUID session ID           │
-│  - Source-document display (RAG answers)             │
-│  - Ticket confirmation panel                         │
-│  - Graceful error states for API/model failures      │
-└───────────────────────┬──────────────────────────────┘
-                        │ POST /chat
-┌───────────────────────▼──────────────────────────────┐
-│              FastAPI API  (port 8000)                │
-│  GET  /health         → real pipeline readiness      │
-│  POST /chat           → process one customer turn    │
-│  GET  /tickets/{id}   → retrieve a created ticket    │
-└───────────────────────┬──────────────────────────────┘
-                        │
-┌───────────────────────▼──────────────────────────────┐
-│           SupportPipeline (src/pipeline.py)          │
-│  - Validates input / session management              │
-│  - Invokes LangGraph workflow                        │
-└──────────┬────────────────────────────┬──────────────┘
-           │                            │
-┌──────────▼────────┐        ┌──────────▼─────────────┐
-│  LangGraph Agent  │        │  ChromaDB Vector Store  │
-│  (src/llm/)       │        │  (knowledge_base/*.md)  │
-│                   │        │  all-MiniLM-L6-v2 embed │
-│  retrieve ──────► │──────► │                         │
-│  decide           │        └─────────────────────────┘
-│  answer           │
-│  collect_or_create│◄──── Mock Ticket Tool
-│                   │      (TicketRepository)
-└───────────────────┘
+The system employs a decoupled, microservices-inspired architecture, separating the presentation layer from the AI orchestration and retrieval layers. Below is a detailed sequence and component architecture diagram.
+
+```mermaid
+graph TD
+    %% Styling
+    classDef frontend fill:#ff9999,stroke:#333,stroke-width:2px,color:black;
+    classDef backend fill:#99ccff,stroke:#333,stroke-width:2px,color:black;
+    classDef orchestration fill:#ffe699,stroke:#333,stroke-width:2px,color:black;
+    classDef rag fill:#c2f0c2,stroke:#333,stroke-width:2px,color:black;
+    classDef llm fill:#d9b3ff,stroke:#333,stroke-width:2px,color:black;
+    classDef external fill:#e6e6e6,stroke:#333,stroke-width:1px,stroke-dasharray: 5 5,color:black;
+
+    %% Components
+    User((User)) --> |HTTP POST /chat| UI
+
+    subgraph Presentation Layer
+        UI["Streamlit UI (Port 8501)<br/>Session-aware, Source pills"]:::frontend
+    end
+
+    UI --> |REST JSON Payload| API
+
+    subgraph Application & Routing Layer
+        API["FastAPI App (Port 8000)<br/>Async Endpoints, Validation"]:::backend
+        SS[("SessionStore<br/>(In-Memory UUID State)")]:::backend
+        API -.-> |Injects| SS
+    end
+
+    API --> |Initializes & Invokes| Pipeline
+
+    subgraph Agentic Orchestration Layer (LangGraph)
+        Pipeline["SupportPipeline<br/>Stateful Execution Engine"]:::orchestration
+        NodeDecide{"Node: decide<br/>(Intent Classification)"}:::orchestration
+        NodeRetrieve["Node: retrieve<br/>(RAG Trigger)"]:::orchestration
+        NodeAnswer["Node: answer<br/>(Response Generation)"]:::orchestration
+        NodeTicket["Node: collect_or_create<br/>(Mock Ticket Tool)"]:::orchestration
+
+        Pipeline --> NodeDecide
+        NodeDecide -->|route == 'answer'| NodeRetrieve
+        NodeRetrieve --> NodeAnswer
+        NodeDecide -->|route == 'ticket'| NodeTicket
+    end
+
+    subgraph RAG & Knowledge Layer
+        DocumentLoader["Document Loader<br/>(Markdown Parsing)"]:::rag
+        Embeddings["HuggingFace Embeddings<br/>(all-MiniLM-L6-v2)"]:::rag
+        VectorDB[("ChromaDB<br/>Persistent Vector Store")]:::rag
+        Retriever["KnowledgeRetriever<br/>Cosine Similarity > 0.30"]:::rag
+
+        DocumentLoader --> Embeddings --> VectorDB
+        NodeRetrieve --> |Query| Retriever
+        Retriever --> |Top K chunks| VectorDB
+    end
+
+    subgraph AI Inference Layer
+        Ollama["Ollama Engine<br/>Local Inference"]:::llm
+        Model["Qwen2.5:3b<br/>(Structured Output via Pydantic)"]:::llm
+        Ollama --> Model
+        NodeDecide -.-> |Pydantic Extraction| Ollama
+        NodeAnswer -.-> |Context + Prompt| Ollama
+    end
+
+    subgraph Tools & External Services
+        TicketDB[("Mock Ticket DB<br/>TicketRepository")]:::external
+        NodeTicket --> |CRUD Operations| TicketDB
+    end
 ```
 
-**Flow:** Customer message → Streamlit → FastAPI → LangGraph workflow → RAG knowledge base + mock ticket tool → agent response → Streamlit display.
+### Detailed Component Breakdown
+
+#### 1. Presentation Layer (Streamlit)
+- **Role:** Handles user interactions, maintains session persistence via UUIDs, and handles HTTP connection errors gracefully.
+- **Data Flow:** Sends JSON payloads containing `session_id` and `message` to the FastAPI backend. Displays RAG source citations (source pills) and dynamic ticket UI forms upon ticket generation.
+
+#### 2. Application & Routing Layer (FastAPI)
+- **Role:** Serves as the asynchronous RESTful backend bridging the UI and the AI Orchestrator. 
+- **Tech Setup:** Uvicorn ASGI server running asynchronous endpoints. Implements rigorous request payload validation using Pydantic.
+- **Dependency Injection:** Injects `KnowledgeRetriever`, `SessionStore`, and `TicketRepository` into the agentic pipeline during initialization.
+
+#### 3. Agentic Orchestration (LangGraph)
+- **Role:** A cyclic, node-based state machine that prevents linear constraints.
+- **Technical Flow:**
+  - **`decide` node:** Uses LLM structural output (forcing a schema response) to classify the user's intent into either a pure query (`route="answer"`) or a support ticket request (`route="ticket"`).
+  - **`retrieve` node:** Triggers the Knowledge Retriever if the context is needed.
+  - **`answer` node:** Synthesizes the final contextually aware response.
+  - **`collect_or_create` node:** Handles multi-turn workflows by checking for missing ticket fields. If complete, it prevents duplicates and securely logs the ticket via `TicketRepository`.
+
+#### 4. Retrieval-Augmented Generation (RAG) Layer
+- **Ingestion Strategy:** Markdown files are parsed via a custom `document_loader.py`.
+- **Vector Operations:** Uses `sentence-transformers/all-MiniLM-L6-v2` for generating embeddings, achieving a balance between speed and precision.
+- **Persistence & Searching:** Embeddings are saved to a local **ChromaDB**. 
+- **Anti-Hallucination Guardrails:** The `KnowledgeRetriever.search()` enforces a strict cosine similarity threshold (`0.30`). Queries returning scores beneath this bound are safely intercepted, prompting the agent to admit missing information rather than hallucinating.
+
+#### 5. Local Inference Layer (Ollama)
+- **Role:** Executes text generation and semantic reasoning.
+- **Tech Setup:** Connects securely via `langchain-openai` integration pointing to `http://localhost:11434/v1`. Runs **Qwen2.5:3b** locally, enforcing 100% data privacy with zero external API dependencies.
 
 ---
 
