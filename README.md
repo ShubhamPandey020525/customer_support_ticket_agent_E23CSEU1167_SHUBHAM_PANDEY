@@ -115,10 +115,17 @@ graph TD
 | Vector store | ChromaDB | ≥0.5 |
 | Embeddings | sentence-transformers/all-MiniLM-L6-v2 | ≥3.0 |
 | LLM | Qwen2.5:3b (default) via Ollama | any |
+| **STT** | **faster-whisper** (local Whisper, CPU, int8) | **≥1.0** |
+| **TTS** | **edge-tts** (Microsoft Edge Neural voices, free) | **≥6.1** |
 
 > **LLM note:** Any OpenAI-compatible endpoint serving an open-source
 > instruction-tuned model works. The default is Qwen2.5:3b via Ollama.
 > No proprietary/closed model API is used.
+
+> **Voice note:** Both STT (faster-whisper) and TTS (edge-tts) are free.
+> faster-whisper requires no API key and runs fully offline.
+> edge-tts uses Microsoft Edge's neural voices (network needed for TTS only).
+> Neither uses any prohibited platform (Pipecat, LiveKit, Agora, etc.).
 
 ---
 
@@ -128,6 +135,7 @@ graph TD
 - **Ollama** (or equivalent OpenAI-compatible local inference endpoint)
 - ~500 MB disk space for the embedding model (downloaded once on first run)
 - ~2 GB RAM for Qwen2.5:3b
+- **Internet connection** required only for edge-tts synthesis (one request per TTS call)
 
 ---
 
@@ -251,6 +259,60 @@ the local ChromaDB with real embeddings for retriever tests.
 
 ---
 
+## Voice Features (Mid-Session Extension)
+
+### STT — Speech-to-Text
+
+| Detail | Value |
+|--------|-------|
+| Provider | `faster-whisper` (local Whisper, no API key) |
+| Model | `base` (CPU, int8 quantised — ~145 MB) |
+| API endpoint | `POST /voice/transcribe` |
+| Input | Any audio file (wav, webm, mp3, ogg) |
+| Prohibited platforms used | **None** |
+
+Flow:
+1. User clicks the 🎤 microphone in Streamlit and records.
+2. Audio bytes are sent to `POST /voice/transcribe`.
+3. Whisper returns the transcript.
+4. Transcript appears in an **editable text area** — user can correct mistakes.
+5. User clicks **✅ Submit Transcript** to send through the normal `POST /chat` pipeline.
+6. Text, session, RAG, and ticket workflows are completely unchanged.
+
+### TTS — Text-to-Speech
+
+| Detail | Value |
+|--------|-------|
+| Provider | `edge-tts` (Microsoft Edge Neural TTS, free) |
+| Voice | `en-US-JennyNeural` (neural, natural-sounding) |
+| API endpoint | `POST /voice/synthesize` |
+| Output | `audio/mpeg` bytes |
+| Prohibited platforms used | **None** |
+
+Flow:
+1. Every agent response in the chat displays a **🔊 Listen** button.
+2. Clicking it calls `POST /voice/synthesize` with the message text.
+3. Audio is cached in session state — replayed without a second API call.
+4. Audio plays inline under the corresponding message only.
+5. If TTS fails, the **text response is preserved** — no data loss.
+
+### New API Endpoints
+
+```sh
+# Transcribe an audio file
+curl -X POST http://localhost:8000/voice/transcribe \
+  -F 'file=@recording.wav'
+
+# Synthesize speech
+curl -X POST http://localhost:8000/voice/synthesize \
+  -H 'Content-Type: application/json' \
+  -d '{"message_id":"msg-1","text":"Ticket CST-2026-0001 has been created."}'
+```
+
+Full API docs with voice endpoints: `http://localhost:8000/docs`
+
+---
+
 ## Manual API Testing
 
 ### Check health
@@ -296,7 +358,7 @@ architectural decision, including:
 
 - Why `build_support_workflow` was extended to accept dependency parameters
 - The "mid-session requirement" interpretation (not defined in the main guide)
-- Exclusion of voice features (mentioned once as apparent boilerplate in §10)
+- Voice provider choices (faster-whisper for STT, edge-tts for TTS)
 - Relevance threshold of 0.30 for "not in KB" detection
 
 ---
@@ -310,3 +372,8 @@ architectural decision, including:
 | "Cannot connect to backend" in UI | FastAPI not running | Start `uvicorn` in a separate terminal |
 | Duplicate chunks warning | Normal on cold start; second run is fast | Idempotent by design — safe to ignore |
 | Embedding model downloads slowly | First-run behaviour | Downloads once and caches locally |
+| 🎤 Mic not recording | Browser permissions | Allow microphone access in browser settings |
+| Transcription slow on first use | Whisper model (~145 MB) downloading | Wait ~1 min on first transcription; cached after |
+| 🔊 TTS fails with network error | edge-tts needs internet | Check network connection; text response is still shown |
+| `POST /voice/transcribe` returns 422 | Empty audio file | Record audio before submitting |
+

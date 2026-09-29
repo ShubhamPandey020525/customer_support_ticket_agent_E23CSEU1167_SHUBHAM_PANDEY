@@ -7,6 +7,7 @@ from src.config import load_settings
 from src.models import ChatRequest, ChatResponse, Ticket
 from src.pipeline import SupportPipeline
 from src.utils.errors import AgentProcessingError, ComponentNotReadyError
+from src.api.voice_router import router as voice_router
 
 
 settings = load_settings()
@@ -23,6 +24,9 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Customer Support Ticket Agent", lifespan=lifespan)
+
+# Register the voice endpoints (POST /voice/transcribe, POST /voice/synthesize)
+app.include_router(voice_router)
 
 
 @app.get("/health")
@@ -54,3 +58,4 @@ async def get_ticket(ticket_id: str) -> Ticket:
     if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
     return ticket
+

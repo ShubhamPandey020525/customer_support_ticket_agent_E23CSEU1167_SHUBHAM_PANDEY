@@ -16,3 +16,7 @@ sentence-transformers>=3,<6
 python-dotenv>=1,<2
 pytest>=8,<9
 pytest-asyncio>=0.24,<1
+# Voice dependencies
+edge-tts>=6.1,<7
+faster-whisper>=1.0,<2
+python-multipart>=0.0.9,<1
