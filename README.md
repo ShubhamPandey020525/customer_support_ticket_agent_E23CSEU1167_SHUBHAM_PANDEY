@@ -145,25 +145,25 @@ ollama pull qwen2.5:3b
 > with an open-source model) can be used by setting `LLM_BASE_URL` and
 > `LLM_MODEL` in `.env`.
 
-### Step 2 — Create a virtual environment
+### Step 2 — Create a Conda environment
 
-#### Windows (PowerShell)
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+First, navigate into the project directory:
+```sh
+cd customer_support_ticket_agent_E23CSEU1167_SHUBHAM_PANDEY
 ```
 
-#### Linux / macOS
+Then create and activate the Conda environment:
 ```sh
-python3.12 -m venv .venv
-source .venv/bin/activate
+conda create -n ai_agent python=3.12 -y
+conda activate ai_agent
 ```
 
 ### Step 3 — Install dependencies
 
+Make sure your Conda environment is activated, then run:
 ```sh
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
 ### Step 4 — Configure environment
@@ -202,6 +202,8 @@ Edit `.env` and set your values. **Never commit `.env` with real secrets.**
 ---
 
 ## Running the Application
+
+Before running the commands below, make sure you are inside the project folder (`cd customer_support_ticket_agent_E23CSEU1167_SHUBHAM_PANDEY`) and your Conda environment is activated (`conda activate ai_agent`) in **both** terminals.
 
 Start the API server first, then the UI in a separate terminal.
 
