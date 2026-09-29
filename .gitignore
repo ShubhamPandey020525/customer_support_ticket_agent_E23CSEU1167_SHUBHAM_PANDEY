@@ -1,0 +1,38 @@
+# Secrets — never commit
+.env
+
+# Python environments
+.venv/
+env/
+venv/
+
+# Python bytecode and caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Vector database and generated data
+.data/
+*.chroma
+chroma.sqlite3
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.sublime-project
+
+# Distribution
+dist/
+build/
+*.egg-info/
+
+# Packaging output
+*.zip
