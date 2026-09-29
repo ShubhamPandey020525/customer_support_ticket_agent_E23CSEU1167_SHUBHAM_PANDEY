@@ -1,379 +1,439 @@
-# Customer Support Ticket Agent
+# 🎧 Customer Support Ticket Agent
+### `E23CSEU1167 — Shubham Pandey`
 
-A text-based customer support agent that answers policy questions using a RAG knowledge base and collects information to raise support tickets through a multi-turn conversation. Built with FastAPI, Streamlit, LangGraph, ChromaDB, and an open-source LLM served locally via Ollama.
+> A fully local, privacy-first AI customer support agent that answers policy questions via **RAG**, raises support tickets through **multi-turn conversation**, and supports **voice input (STT) + voice playback (TTS)** — all without any external API keys.
 
 ---
 
-## System Architecture & Technical Design
+## 📐 System Architecture
 
-The system employs a decoupled, microservices-inspired architecture, separating the presentation layer from the AI orchestration and retrieval layers. Below is a detailed sequence and component architecture diagram.
+The system is a **decoupled, microservices-style** pipeline with 5 distinct layers communicating over REST and in-process async calls.
 
 ```mermaid
 graph TD
-    %% Styling
-    classDef frontend fill:#ff9999,stroke:#333,stroke-width:2px,color:black;
-    classDef backend fill:#99ccff,stroke:#333,stroke-width:2px,color:black;
-    classDef orchestration fill:#ffe699,stroke:#333,stroke-width:2px,color:black;
-    classDef rag fill:#c2f0c2,stroke:#333,stroke-width:2px,color:black;
-    classDef llm fill:#d9b3ff,stroke:#333,stroke-width:2px,color:black;
-    classDef external fill:#e6e6e6,stroke:#333,stroke-width:1px,stroke-dasharray: 5 5,color:black;
+    classDef ui fill:#f97316,stroke:#333,stroke-width:2px,color:#fff;
+    classDef api fill:#3b82f6,stroke:#333,stroke-width:2px,color:#fff;
+    classDef orch fill:#a855f7,stroke:#333,stroke-width:2px,color:#fff;
+    classDef rag fill:#22c55e,stroke:#333,stroke-width:2px,color:#fff;
+    classDef llm fill:#ec4899,stroke:#333,stroke-width:2px,color:#fff;
+    classDef voice fill:#14b8a6,stroke:#333,stroke-width:2px,color:#fff;
+    classDef store fill:#64748b,stroke:#333,stroke-width:2px,color:#fff;
 
-    %% Components
-    User((User)) --> |HTTP POST /chat| UI
+    User((👤 User)) --> |Types or speaks| StreamlitUI
 
-    subgraph PresentationLayer [Presentation Layer]
-        UI["Streamlit UI (Port 8501)<br/>Session-aware, Source pills"]:::frontend
+    subgraph L1 [" 🖥️  Presentation Layer — Streamlit :8501"]
+        StreamlitUI["streamlit_app.py\nSession UUID • Chat history\nSource pills • Ticket panel\n🎤 Mic recorder • 🔊 Speaker btn"]:::ui
     end
 
-    UI --> |REST JSON Payload| API
+    StreamlitUI --> |POST /chat  {session_id, message}| FastAPI
+    StreamlitUI --> |POST /voice/transcribe  audio bytes| VoiceRouter
+    StreamlitUI --> |POST /voice/synthesize  text| VoiceRouter
 
-    subgraph ApplicationLayer [Application & Routing Layer]
-        API["FastAPI App (Port 8000)<br/>Async Endpoints, Validation"]:::backend
-        SS[("SessionStore<br/>(In-Memory UUID State)")]:::backend
-        API -.-> |Injects| SS
+    subgraph L2 [" ⚡  Application Layer — FastAPI :8000 "]
+        FastAPI["src/api/server.py\nAsync ASGI · Uvicorn\nPydantic validation\nHTTP 422 / 502 / 503"]:::api
+        VoiceRouter["src/api/voice_router.py\nPOST /voice/transcribe\nPOST /voice/synthesize"]:::api
     end
 
-    API --> |Initializes & Invokes| Pipeline
+    FastAPI --> |ainvoke| Pipeline
 
-    subgraph OrchestrationLayer [Agentic Orchestration Layer - LangGraph]
-        Pipeline["SupportPipeline<br/>Stateful Execution Engine"]:::orchestration
-        NodeDecide{"Node: decide<br/>(Intent Classification)"}:::orchestration
-        NodeRetrieve["Node: retrieve<br/>(RAG Trigger)"]:::orchestration
-        NodeAnswer["Node: answer<br/>(Response Generation)"]:::orchestration
-        NodeTicket["Node: collect_or_create<br/>(Mock Ticket Tool)"]:::orchestration
+    subgraph L3 [" 🤖  Agentic Orchestration — LangGraph"]
+        Pipeline["src/pipeline.py\nSupportPipeline\nDI: retriever · sessions · tickets"]:::orch
+        Retrieve["Node: retrieve\nChromaDB cosine search\nTop-1 chunk · threshold 0.30"]:::orch
+        Decide{"Node: decide\nStructured output\n_IntentAndFields\nroute = answer | ticket"}:::orch
+        Answer["Node: answer\nRAG grounded response\nmax_tokens=512"]:::orch
+        Ticket["Node: collect_or_create\nMulti-turn field collection\nDuplicate guard via session.ticket_id"]:::orch
 
-        Pipeline --> NodeDecide
-        NodeDecide -->|route == 'answer'| NodeRetrieve
-        NodeRetrieve --> NodeAnswer
-        NodeDecide -->|route == 'ticket'| NodeTicket
+        Pipeline --> Retrieve
+        Retrieve --> Decide
+        Decide -->|route == answer| Answer
+        Decide -->|route == ticket| Ticket
     end
 
-    subgraph RAGLayer [RAG & Knowledge Layer]
-        DocumentLoader["Document Loader<br/>(Markdown Parsing)"]:::rag
-        Embeddings["HuggingFace Embeddings<br/>(all-MiniLM-L6-v2)"]:::rag
-        VectorDB[("ChromaDB<br/>Persistent Vector Store")]:::rag
-        Retriever["KnowledgeRetriever<br/>Cosine Similarity > 0.30"]:::rag
+    subgraph L4 [" 🔍  RAG & Knowledge Layer"]
+        DocLoader["src/rag/document_loader.py\nMarkdown ingestion\nStable SHA-256 chunk IDs"]:::rag
+        Embeddings["src/rag/embeddings.py\nall-MiniLM-L6-v2\nHuggingFace · CPU"]:::rag
+        ChromaDB[("ChromaDB\n.data/vector_db\nCosine similarity\nPersistent")]:::rag
+        Retriever["src/rag/retriever.py\nKnowledgeRetriever\nThreshold: 0.30\nThread-pool init"]:::rag
 
-        DocumentLoader --> Embeddings --> VectorDB
-        NodeRetrieve --> |Query| Retriever
-        Retriever --> |Top K chunks| VectorDB
+        DocLoader --> Embeddings --> ChromaDB
+        Retrieve --> Retriever --> ChromaDB
     end
 
-    subgraph AILayer [AI Inference Layer]
-        Ollama["Ollama Engine<br/>Local Inference"]:::llm
-        Model["Qwen2.5:3b<br/>(Structured Output via Pydantic)"]:::llm
-        Ollama --> Model
-        NodeDecide -.-> |Pydantic Extraction| Ollama
-        NodeAnswer -.-> |Context + Prompt| Ollama
+    subgraph L5 [" 🧠  AI Inference Layer — Ollama"]
+        OllamaEngine["Ollama :11434\nlangchain-openai adapter\nOpenAI-compatible API"]:::llm
+        LLMModel["Qwen2.5:3b\ntemp=0.1 · max_tokens=512\nStructured output via Pydantic"]:::llm
+        OllamaEngine --> LLMModel
+        Decide -.->|Structured extraction| OllamaEngine
+        Answer -.->|Grounded generation| OllamaEngine
     end
 
-    subgraph ExternalServices [Tools & External Services]
-        TicketDB[("Mock Ticket DB<br/>TicketRepository")]:::external
-        NodeTicket --> |CRUD Operations| TicketDB
+    subgraph L6 [" 🎙️  Voice Layer"]
+        WhisperSTT["src/voice/stt_adapter.py\nfaster-whisper tiny\nCPU · int8 · no API key"]:::voice
+        EdgeTTS["src/voice/tts_adapter.py\nedge-tts\nen-US-JennyNeural\naudio/mpeg"]:::voice
+        VoicePipeline["src/voice/pipeline.py\nVoicePipeline\nTiming · guardrails"]:::voice
+        VoiceRouter --> VoicePipeline
+        VoicePipeline --> WhisperSTT
+        VoicePipeline --> EdgeTTS
     end
+
+    subgraph L7 [" 🗄️  State & Storage"]
+        SessionStore[("src/sessions/store.py\nIn-memory UUID sessions\nConversationState\nticket_id · history")]:::store
+        TicketRepo[("src/tools/ticket_tool.py\nTicketRepository\nMock in-memory DB\nCST-YYYY-NNNN IDs")]:::store
+    end
+
+    Pipeline -.-> SessionStore
+    Ticket --> TicketRepo
 ```
 
-### Detailed Component Breakdown
+---
 
-#### 1. Presentation Layer (Streamlit)
-- **Role:** Handles user interactions, maintains session persistence via UUIDs, and handles HTTP connection errors gracefully.
-- **Data Flow:** Sends JSON payloads containing `session_id` and `message` to the FastAPI backend. Displays RAG source citations (source pills) and dynamic ticket UI forms upon ticket generation.
+## 🔄 Request Data Flow (Step by Step)
 
-#### 2. Application & Routing Layer (FastAPI)
-- **Role:** Serves as the asynchronous RESTful backend bridging the UI and the AI Orchestrator. 
-- **Tech Setup:** Uvicorn ASGI server running asynchronous endpoints. Implements rigorous request payload validation using Pydantic.
-- **Dependency Injection:** Injects `KnowledgeRetriever`, `SessionStore`, and `TicketRepository` into the agentic pipeline during initialization.
-
-#### 3. Agentic Orchestration (LangGraph)
-- **Role:** A cyclic, node-based state machine that prevents linear constraints.
-- **Technical Flow:**
-  - **`decide` node:** Uses LLM structural output (forcing a schema response) to classify the user's intent into either a pure query (`route="answer"`) or a support ticket request (`route="ticket"`).
-  - **`retrieve` node:** Triggers the Knowledge Retriever if the context is needed.
-  - **`answer` node:** Synthesizes the final contextually aware response.
-  - **`collect_or_create` node:** Handles multi-turn workflows by checking for missing ticket fields. If complete, it prevents duplicates and securely logs the ticket via `TicketRepository`.
-
-#### 4. Retrieval-Augmented Generation (RAG) Layer
-- **Ingestion Strategy:** Markdown files are parsed via a custom `document_loader.py`.
-- **Vector Operations:** Uses `sentence-transformers/all-MiniLM-L6-v2` for generating embeddings, achieving a balance between speed and precision.
-- **Persistence & Searching:** Embeddings are saved to a local **ChromaDB**. 
-- **Anti-Hallucination Guardrails:** The `KnowledgeRetriever.search()` enforces a strict cosine similarity threshold (`0.30`). Queries returning scores beneath this bound are safely intercepted, prompting the agent to admit missing information rather than hallucinating.
-
-#### 5. Local Inference Layer (Ollama)
-- **Role:** Executes text generation and semantic reasoning.
-- **Tech Setup:** Connects securely via `langchain-openai` integration pointing to `http://localhost:11434/v1`. Runs **Qwen2.5:3b** locally, enforcing 100% data privacy with zero external API dependencies.
+```
+User types/speaks → Streamlit UI
+  │
+  ├─[Voice] → POST /voice/transcribe → faster-whisper → editable transcript
+  │              User edits → confirms → text passed to next step
+  │
+  └─[Text/Confirmed] → POST /chat {session_id, message}
+        │
+        ▼
+    FastAPI validates (Pydantic) → SupportPipeline.process()
+        │
+        ▼
+    LangGraph START
+        │
+        ├─ Node: retrieve
+        │    └─ KnowledgeRetriever.search(message)
+        │         └─ ChromaDB cosine similarity (top-1, threshold > 0.30)
+        │
+        ├─ Node: decide (LLM call #1)
+        │    └─ Qwen2.5:3b structured output → {route, customer_name, email, ...}
+        │         ├─ route = "answer" ──────────────────────────────────┐
+        │         └─ route = "ticket" ─────────────────────────────┐   │
+        │                                                           │   │
+        ├─ Node: answer (LLM call #2, only on route=answer)  ◄─────┘   │
+        │    └─ Context (1 chunk ≤600 chars) + short prompt            │
+        │         → Qwen2.5:3b → grounded text response               │
+        │                                                              │
+        └─ Node: collect_or_create (no LLM call) ◄────────────────────┘
+             ├─ Check session.ticket_id (idempotency guard)
+             ├─ Merge extracted fields into ConversationState
+             ├─ If fields missing → ask follow-up question
+             └─ If all fields present → TicketRepository.create() → ticket_id
+        │
+        ▼
+    LangGraph END
+        │
+        ▼
+    FastAPI → ChatResponse {response, sources, ticket_id}
+        │
+        ▼
+    Streamlit renders:
+        ├─ Agent text response
+        ├─ 📄 Source pills (RAG citations)
+        ├─ 🎫 Ticket confirmation box (if ticket created)
+        └─ 🔊 Listen button → POST /voice/synthesize → edge-tts → audio playback
+```
 
 ---
 
-## Technology Stack
+## 🛠️ Technology Stack
 
-| Component | Library | Version |
-|-----------|---------|---------|
-| API | FastAPI + Uvicorn | ≥0.115 / ≥0.30 |
-| UI | Streamlit | ≥1.40 |
-| LLM client | langchain-openai (ChatOpenAI) | ≥0.3 |
-| Agent framework | LangGraph | ≥0.2 |
-| Vector store | ChromaDB | ≥0.5 |
-| Embeddings | sentence-transformers/all-MiniLM-L6-v2 | ≥3.0 |
-| LLM | Qwen2.5:3b (default) via Ollama | any |
-| **STT** | **faster-whisper** (local Whisper, CPU, int8) | **≥1.0** |
-| **TTS** | **edge-tts** (Microsoft Edge Neural voices, free) | **≥6.1** |
-
-> **LLM note:** Any OpenAI-compatible endpoint serving an open-source
-> instruction-tuned model works. The default is Qwen2.5:3b via Ollama.
-> No proprietary/closed model API is used.
-
-> **Voice note:** Both STT (faster-whisper) and TTS (edge-tts) are free.
-> faster-whisper requires no API key and runs fully offline.
-> edge-tts uses Microsoft Edge's neural voices (network needed for TTS only).
-> Neither uses any prohibited platform (Pipecat, LiveKit, Agora, etc.).
+| Layer | Component | Library / Tool | Version |
+|-------|-----------|----------------|---------|
+| Frontend | Chat UI | Streamlit | ≥1.40 |
+| Backend API | REST Server | FastAPI + Uvicorn | ≥0.115 / ≥0.30 |
+| Validation | Schema | Pydantic v2 | ≥2.9 |
+| HTTP Client | UI → API | httpx | ≥0.27 |
+| Orchestration | Agent Graph | LangGraph | ≥0.2 |
+| LLM | Local Inference | Ollama → Qwen2.5:3b | any |
+| LLM Adapter | LangChain | langchain-openai | ≥0.3 |
+| Embeddings | Sentence BERT | sentence-transformers/all-MiniLM-L6-v2 | ≥3.0 |
+| Vector Store | RAG DB | ChromaDB (persistent, cosine) | ≥0.5 |
+| STT | Speech-to-Text | faster-whisper (tiny, CPU, int8) | ≥1.0 |
+| TTS | Text-to-Speech | edge-tts (en-US-JennyNeural) | ≥6.1 |
+| Testing | Test Runner | pytest + pytest-asyncio | ≥8 / ≥0.24 |
 
 ---
 
-## Requirements
+## 📋 Prerequisites
 
-- **Python 3.12** or newer (3.11+ works too)
-- **Ollama** (or equivalent OpenAI-compatible local inference endpoint)
-- ~500 MB disk space for the embedding model (downloaded once on first run)
-- ~2 GB RAM for Qwen2.5:3b
-- **Internet connection** required only for edge-tts synthesis (one request per TTS call)
+Before cloning and running, make sure you have:
+
+| Requirement | Why | Install |
+|-------------|-----|---------|
+| **Python 3.12** | Project target version | [python.org](https://python.org) |
+| **Conda / Miniconda** | Environment management | [docs.conda.io](https://docs.conda.io) |
+| **Ollama** | Local LLM inference engine | [ollama.com](https://ollama.com) |
+| **Git** | Clone the repo | [git-scm.com](https://git-scm.com) |
+| **~3 GB free RAM** | For Qwen2.5:3b model | — |
+| **~700 MB disk** | Embeddings + Whisper models | — |
+| **Internet** | First-run model downloads + edge-tts | — |
 
 ---
 
-## Setup
+## 🚀 Complete Setup Guide (Zero to Running)
 
-### Step 1 — Install Ollama and pull the model
+### Step 1 — Clone the Repository
 
-Download Ollama from https://ollama.com and then:
+```sh
+git clone https://github.com/ShubhamPandey020525/customer_support_ticket_agent_E23CSEU1167_SHUBHAM_PANDEY.git
+cd customer_support_ticket_agent_E23CSEU1167_SHUBHAM_PANDEY
+```
+
+---
+
+### Step 2 — Install and Start Ollama
+
+1. Download and install Ollama from **https://ollama.com**
+2. Make sure Ollama is running (it starts automatically after install on most systems)
+3. Pull the LLM model:
 
 ```sh
 ollama pull qwen2.5:3b
 ```
 
-> **Alternative:** Any OpenAI-compatible endpoint (LM Studio, vLLM, Together AI
-> with an open-source model) can be used by setting `LLM_BASE_URL` and
-> `LLM_MODEL` in `.env`.
+> ⏳ This downloads ~2 GB once. Subsequent startups are instant.
 
-### Step 2 — Create a Conda environment
-
-First, navigate into the project directory:
+Verify Ollama is running:
 ```sh
-cd customer_support_ticket_agent_E23CSEU1167_SHUBHAM_PANDEY
+ollama list
+# Should show: qwen2.5:3b
 ```
 
-Then create and activate the Conda environment:
+---
+
+### Step 3 — Create Conda Environment
+
 ```sh
-conda create -n ai_agent python=3.12 -y
-conda activate ai_agent
+conda create -n support_agent python=3.12 -y
+conda activate support_agent
 ```
 
-### Step 3 — Install dependencies
+> ⚠️ Every terminal you open must run `conda activate support_agent` before any project commands.
 
-Make sure your Conda environment is activated, then run:
+---
+
+### Step 4 — Install Python Dependencies
+
 ```sh
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### Step 4 — Configure environment
+> ⏳ First install takes 3–5 minutes (downloads PyTorch, sentence-transformers, etc.)
 
-#### Windows (PowerShell)
+---
+
+### Step 5 — Configure Environment Variables
+
+**Windows (cmd / PowerShell):**
 ```powershell
-Copy-Item .env.example .env
+copy .env.example .env
 ```
 
-#### Linux / macOS
+**Linux / macOS:**
 ```sh
 cp .env.example .env
 ```
 
-Edit `.env` and set your values. **Never commit `.env` with real secrets.**
+The default `.env` works out of the box with Ollama on localhost. You only need to edit it if you use a different model or port.
+
+| Variable | Default | Change if… |
+|----------|---------|------------|
+| `LLM_BASE_URL` | `http://localhost:11434/v1` | Using LM Studio or another provider |
+| `LLM_MODEL` | `qwen2.5:3b` | Using a different Ollama model |
+| `LLM_API_KEY` | `not-required` | Using a provider that needs a key |
+| `VECTOR_DB_PATH` | `.data/vector_db` | Want to store DB elsewhere |
+| `API_PORT` | `8000` | Port 8000 is taken |
+| `STREAMLIT_PORT` | `8501` | Port 8501 is taken |
+
+> 🔒 **Never commit your `.env` file.** It is already in `.gitignore`.
 
 ---
 
-## Environment Variables
+### Step 6 — Run the Application
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible endpoint URL |
-| `LLM_API_KEY` | `not-required` | API key (use `not-required` for Ollama) |
-| `LLM_MODEL` | `qwen2.5:3b` | Model name to use |
-| `API_BASE_URL` | `http://localhost:8000` | Used by Streamlit to reach FastAPI |
-| `API_HOST` | `127.0.0.1` | FastAPI bind address |
-| `API_PORT` | `8000` | FastAPI port |
-| `STREAMLIT_HOST` | `127.0.0.1` | Streamlit bind address |
-| `STREAMLIT_PORT` | `8501` | Streamlit port |
-| `VECTOR_DB_PATH` | `.data/vector_db` | ChromaDB persistence directory |
-| `EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | HuggingFace embedding model |
-| `RAG_COLLECTION` | `customer-support` | ChromaDB collection name |
-| `RAG_TOP_K` | `3` | Number of chunks to retrieve per query |
+You need **two separate terminals**, both with the conda environment activated and inside the project folder.
 
----
-
-## Running the Application
-
-Before running the commands below, make sure you are inside the project folder (`cd customer_support_ticket_agent_E23CSEU1167_SHUBHAM_PANDEY`) and your Conda environment is activated (`conda activate ai_agent`) in **both** terminals.
-
-Start the API server first, then the UI in a separate terminal.
-
-### Terminal 1 — FastAPI backend
-
-#### Linux / macOS
+**Terminal 1 — Start the FastAPI Backend:**
 ```sh
-uvicorn src.api.server:app --reload --host ${API_HOST:-127.0.0.1} --port ${API_PORT:-8000}
-```
-
-#### Windows (PowerShell)
-```powershell
+conda activate support_agent
 uvicorn src.api.server:app --reload --host 127.0.0.1 --port 8000
 ```
 
-The API docs are available at `http://localhost:8000/docs`.
-
-### Terminal 2 — Streamlit UI
-
-#### Linux / macOS
-```sh
-streamlit run streamlit_app.py --server.address ${STREAMLIT_HOST:-127.0.0.1} --server.port ${STREAMLIT_PORT:-8501}
+Wait until you see:
+```
+INFO:     Application startup complete.
 ```
 
-#### Windows (PowerShell)
-```powershell
+**Terminal 2 — Start the Streamlit UI:**
+```sh
+conda activate support_agent
 streamlit run streamlit_app.py --server.address 127.0.0.1 --server.port 8501
 ```
 
-Open `http://localhost:8501` in your browser.
+**Open your browser:** → **http://localhost:8501**
 
 ---
 
-## Running Tests
+### Step 7 — Verify Everything is Working
+
+Run this health check:
+```sh
+curl http://localhost:8000/health
+# Expected: {"status": "ready"}
+```
+
+View all API endpoints (Swagger UI):
+```
+http://localhost:8000/docs
+```
+
+---
+
+## 🧪 Running Tests
 
 ```sh
+conda activate support_agent
 pytest -v
 ```
 
-The test suite runs without a running API server or LLM — it uses mocks and
-the local ChromaDB with real embeddings for retriever tests.
+The test suite covers:
+- ✅ RAG retrieval with real ChromaDB + fake embeddings
+- ✅ LangGraph node logic with mocked LLM
+- ✅ Voice pipeline (STT + TTS) with fake adapters
+- ✅ FastAPI endpoint contracts
+- ✅ Ticket creation and deduplication
+- ✅ Empty audio / no-speech error handling
 
-> **Note:** The retriever integration tests (`test_retriever.py`) download the
-> embedding model (~90 MB) on first run. Subsequent runs use the local cache.
+> **Note:** First run downloads the embedding model (~90 MB). Subsequent runs use local cache.
 
 ---
 
-## Voice Features (Mid-Session Extension)
+## 🎙️ Voice Features
 
-### STT — Speech-to-Text
+### Microphone Input (STT)
 
-| Detail | Value |
-|--------|-------|
-| Provider | `faster-whisper` (local Whisper, no API key) |
-| Model | `base` (CPU, int8 quantised — ~145 MB) |
-| API endpoint | `POST /voice/transcribe` |
-| Input | Any audio file (wav, webm, mp3, ogg) |
-| Prohibited platforms used | **None** |
+1. Click the **🎤 microphone** control in the UI
+2. Speak your question
+3. Wait for transcription (faster-whisper tiny model, ~1–3 sec on CPU)
+4. **Edit the transcript** if needed in the text box
+5. Click **✅ Submit Transcript** — your message goes through the normal chat pipeline
 
-Flow:
-1. User clicks the 🎤 microphone in Streamlit and records.
-2. Audio bytes are sent to `POST /voice/transcribe`.
-3. Whisper returns the transcript.
-4. Transcript appears in an **editable text area** — user can correct mistakes.
-5. User clicks **✅ Submit Transcript** to send through the normal `POST /chat` pipeline.
-6. Text, session, RAG, and ticket workflows are completely unchanged.
+### Speaker Playback (TTS)
 
-### TTS — Text-to-Speech
+- Every agent response has a **🔊 Listen** button
+- Click it to generate and play audio (Microsoft Edge Neural voice, `en-US-JennyNeural`)
+- Audio is **cached per message** — replays instantly without a second API call
+- If TTS fails (e.g., no internet), the **text response is always preserved**
 
-| Detail | Value |
-|--------|-------|
-| Provider | `edge-tts` (Microsoft Edge Neural TTS, free) |
-| Voice | `en-US-JennyNeural` (neural, natural-sounding) |
-| API endpoint | `POST /voice/synthesize` |
-| Output | `audio/mpeg` bytes |
-| Prohibited platforms used | **None** |
-
-Flow:
-1. Every agent response in the chat displays a **🔊 Listen** button.
-2. Clicking it calls `POST /voice/synthesize` with the message text.
-3. Audio is cached in session state — replayed without a second API call.
-4. Audio plays inline under the corresponding message only.
-5. If TTS fails, the **text response is preserved** — no data loss.
-
-### New API Endpoints
+### Voice API Endpoints
 
 ```sh
-# Transcribe an audio file
+# Transcribe audio
 curl -X POST http://localhost:8000/voice/transcribe \
-  -F 'file=@recording.wav'
+  -F "file=@recording.wav"
 
 # Synthesize speech
 curl -X POST http://localhost:8000/voice/synthesize \
-  -H 'Content-Type: application/json' \
-  -d '{"message_id":"msg-1","text":"Ticket CST-2026-0001 has been created."}'
+  -H "Content-Type: application/json" \
+  -d '{"message_id": "msg-1", "text": "Your ticket has been created."}'
 ```
-
-Full API docs with voice endpoints: `http://localhost:8000/docs`
 
 ---
 
-## Manual API Testing
+## 💬 What Can You Ask?
 
-### Check health
-```sh
-curl http://localhost:8000/health
-```
-
-### Send a chat message (Linux / macOS)
-```sh
-curl -X POST http://localhost:8000/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"session_id":"demo-1","message":"How long does standard shipping take?"}'
-```
-
-### Windows PowerShell equivalent
-```powershell
-Invoke-RestMethod -Method POST -Uri http://localhost:8000/chat `
-  -ContentType 'application/json' `
-  -Body '{"session_id":"demo-1","message":"How long does standard shipping take?"}'
-```
-
-You can also use the interactive `/docs` interface at `http://localhost:8000/docs`.
+| Intent | Example | What Happens |
+|--------|---------|--------------|
+| Policy question | *"How long does standard shipping take?"* | RAG retrieves from `shipping.md`, grounded answer shown with source pill |
+| Returns question | *"What is your refund policy?"* | RAG retrieves from `returns.md` |
+| Raise a ticket | *"I was double charged on my order"* | Agent collects name, email, category → creates ticket `CST-YYYY-NNNN` |
+| Out-of-scope | *"What's the weather today?"* | Agent politely admits it cannot help, offers alternatives |
+| Greeting | *"Hello!"* | Friendly welcome response |
 
 ---
 
-## Knowledge Base
+## 📁 Project Structure
 
-The four supplied Markdown documents in `knowledge_base/`:
-
-| File | Topic |
-|------|-------|
-| `shipping.md` | Standard and express delivery times |
-| `payments.md` | Duplicate charges and payment issues |
-| `returns.md` | Return window and refund timeline |
-| `accounts.md` | Password reset and account security |
+```
+customer_support_ticket_agent_E23CSEU1167_SHUBHAM_PANDEY/
+│
+├── streamlit_app.py              # Frontend UI (chat + voice)
+├── requirements.txt              # All Python dependencies
+├── .env.example                  # Template for environment config
+│
+├── src/
+│   ├── api/
+│   │   ├── server.py             # FastAPI app + lifespan startup
+│   │   └── voice_router.py       # POST /voice/transcribe & /synthesize
+│   ├── llm/
+│   │   ├── client.py             # ChatOpenAI → Ollama adapter
+│   │   ├── prompts.py            # System prompt + answer template
+│   │   └── workflow.py           # LangGraph graph (4 nodes)
+│   ├── rag/
+│   │   ├── document_loader.py    # Markdown ingestion + chunking
+│   │   ├── embeddings.py         # HuggingFace all-MiniLM-L6-v2
+│   │   └── retriever.py          # KnowledgeRetriever (ChromaDB, threshold 0.30)
+│   ├── voice/
+│   │   ├── contracts.py          # Abstract STTService / TTSService
+│   │   ├── pipeline.py           # VoicePipeline (timing + guardrails)
+│   │   ├── stt_adapter.py        # faster-whisper (tiny, CPU, int8)
+│   │   ├── tts_adapter.py        # edge-tts (en-US-JennyNeural)
+│   │   └── models.py             # TranscriptionResponse, SynthesisRequest
+│   ├── sessions/
+│   │   └── store.py              # In-memory UUID session store
+│   ├── tools/
+│   │   └── ticket_tool.py        # TicketRepository + create_ticket_tool
+│   ├── config.py                 # Settings (pydantic-settings, .env)
+│   ├── models.py                 # ChatRequest, ChatResponse, Ticket schemas
+│   └── pipeline.py               # SupportPipeline (DI + orchestration)
+│
+├── knowledge_base/
+│   ├── shipping.md               # Shipping times & policies
+│   ├── payments.md               # Payment & duplicate charge info
+│   ├── returns.md                # Return window & refund timeline
+│   └── accounts.md               # Account & password reset info
+│
+├── tests/
+│   ├── test_voice.py             # 17 voice pipeline tests
+│   ├── test_retriever.py         # RAG integration tests
+│   └── ...                       # Other unit tests
+│
+├── mid_session_requirements/     # Supplied scaffold (merged, not separate app)
+│   └── voice/                    # Original contracts & pipeline scaffold
+│
+├── DECISIONS.md                  # Architectural decisions & rationale
+└── REQUIREMENTS_STATUS.md        # Full requirements traceability matrix
+```
 
 ---
 
-## Tech Stack Substitutions and Deviations
+## 🔧 Troubleshooting
 
-See [`DECISIONS.md`](./DECISIONS.md) for the full rationale behind every
-architectural decision, including:
-
-- Why `build_support_workflow` was extended to accept dependency parameters
-- The "mid-session requirement" interpretation (not defined in the main guide)
-- Voice provider choices (faster-whisper for STT, edge-tts for TTS)
-- Relevance threshold of 0.30 for "not in KB" detection
-
----
-
-## Troubleshooting
-
-| Symptom | Likely cause | Fix |
+| Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
-| `GET /health` returns 503 | Retriever initialisation failed (model not downloaded or ChromaDB error) | Check terminal logs; ensure `VECTOR_DB_PATH` is writable |
-| LLM calls time out | Ollama not running, or wrong `LLM_BASE_URL` | Run `ollama serve` and `ollama pull qwen2.5:3b` |
-| "Cannot connect to backend" in UI | FastAPI not running | Start `uvicorn` in a separate terminal |
-| Duplicate chunks warning | Normal on cold start; second run is fast | Idempotent by design — safe to ignore |
-| Embedding model downloads slowly | First-run behaviour | Downloads once and caches locally |
-| 🎤 Mic not recording | Browser permissions | Allow microphone access in browser settings |
-| Transcription slow on first use | Whisper model (~145 MB) downloading | Wait ~1 min on first transcription; cached after |
-| 🔊 TTS fails with network error | edge-tts needs internet | Check network connection; text response is still shown |
-| `POST /voice/transcribe` returns 422 | Empty audio file | Record audio before submitting |
+| `GET /health` → 503 | ChromaDB or embedding init failed | Check uvicorn terminal for error; ensure `.data/` is writable |
+| LLM response times out | Ollama not running / wrong URL | Run `ollama serve` then `ollama pull qwen2.5:3b` |
+| "Cannot connect to backend" in UI | FastAPI not started | Open Terminal 1 and run the uvicorn command |
+| Streamlit blank / port error | Port 8501 taken | Change `STREAMLIT_PORT` in `.env` |
+| Duplicate chunks log warning | Normal on restart | Idempotent by design — safe to ignore |
+| 🎤 Mic not working | Browser permission denied | Allow microphone in browser → address bar lock icon |
+| Transcription very slow (1st time) | Whisper `tiny` model downloading (~75 MB) | Wait ~1 min; cached after first run |
+| 🔊 TTS fails / no audio | No internet connection | edge-tts needs network; text response still shown |
+| `POST /voice/transcribe` → 422 | Uploaded empty audio file | Record audio before submitting |
+| Tests fail on `test_retriever` | Embedding model downloading | Normal on first run; wait for download |
 
+---
+
+## 📖 Design Decisions
+
+See [`DECISIONS.md`](./DECISIONS.md) for the full rationale, including:
+
+- Why LangGraph over a simple chain (cyclic state, multi-turn ticket collection)
+- Why `faster-whisper` + `edge-tts` (free, no API keys, compliant with restrictions)
+- Why cosine similarity threshold of `0.30` (anti-hallucination guardrail)
+- Why dependency injection into LangGraph nodes (testability)
+- Performance optimizations: `max_tokens=512`, top-1 RAG chunk, thread-pool init
